@@ -1,0 +1,75 @@
+name: Build Crystalline OS ISO
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y live-build debootstrap xorriso squashfs-tools mtools arch-install-scripts
+
+      - name: Setup Build Configuration
+        run: |
+          mkdir -p iso-build
+          cd iso-build
+          lb config --architecture amd64 \
+                    --distribution bookworm \
+                    --archive-areas "main contrib non-free non-free-firmware" \
+                    --bootloader grub-efi \
+                    --debian-installer false
+
+      - name: Customize OS Packages
+        run: |
+          mkdir -p iso-build/config/package-lists
+          cat << 'EOF' > iso-build/config/package-lists/desktop.list.chroot
+          kde-plasma-desktop
+          pipewire
+          network-manager
+          flatpak
+          python3
+          python3-pip
+          curl
+          git
+          wget
+          EOF
+
+      - name: Inject Gemini Daemon
+        run: |
+          mkdir -p iso-build/config/includes.chroot/usr/local/bin
+          cat << 'EOF' > iso-build/config/includes.chroot/usr/local/bin/gemini-daemon
+          #!/usr/bin/env python3
+          import time, subprocess, json
+
+          def audit_logs():
+              try:
+                  res = subprocess.run("journalctl -p 3 -n 5 --no-pager -o json", shell=True, capture_output=True, text=True)
+                  return [json.loads(line) for line in res.stdout.strip().split('\n') if line]
+              except Exception:
+                  return []
+
+          if __name__ == "__main__":
+              while True:
+                  errs = audit_logs()
+                  if errs:
+                      print(f"[Gemini Monitor]: Detected {len(errs)} system issue(s). Auto-repair ready.")
+                  time.sleep(15)
+          EOF
+          chmod +x iso-build/config/includes.chroot/usr/local/bin/gemini-daemon
+
+      - name: Build ISO Image
+        run: |
+          cd iso-build
+          sudo lb build
+
+      - name: Upload ISO Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Crystalline-OS-Installer
+          path: iso-build/*.iso
