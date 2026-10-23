@@ -1,4 +1,4 @@
-name: Build Crystalline OS ISO (Docker Native)
+name: Build Crystalline OS ISO (Explicit Keyring Fix)
 
 on:
   workflow_dispatch:
@@ -25,6 +25,7 @@ jobs:
           lb config --architecture amd64 \
                     --distribution bookworm \
                     --security false \
+                    --keyring-packages "debian-archive-keyring" \
                     --mirror-bootstrap "http://deb.debian.org/debian/" \
                     --mirror-chroot "http://deb.debian.org/debian/" \
                     --archive-areas "main contrib non-free non-free-firmware" \
