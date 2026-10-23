@@ -1,4 +1,4 @@
-name: Build Crystalline OS ISO (Pure Debian Fix)
+name: Build Crystalline OS ISO (Keyring Bypass Fix)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Prepare Loop Devices & Debian Keyrings
+      - name: Prepare Loop Devices & Keyrings Bypass
         run: |
           sudo modprobe loop
           sudo apt-get update
@@ -20,10 +20,13 @@ jobs:
               sudo mknod -m 0660 /dev/loop$i b 7 $i
             fi
           done
+          # تحميل مفتاح أوبونتو محلياً لتجاوز خطأ التبعية أثناء بناء ديبيان
+          mkdir -p iso-build/config/packages.chroot
+          cd iso-build/config/packages.chroot
+          apt-get download ubuntu-keyring
 
       - name: Setup Build Configuration
         run: |
-          mkdir -p iso-build
           cd iso-build
           lb config --architecture amd64 \
                     --distribution bookworm \
@@ -77,7 +80,7 @@ jobs:
 
           def audit_logs():
               try:
-                  res = subprocess.run("journalctl -p 3 -n 5 --no-pager -o json", shell=True, capture_output=True, text=True)
+                  res = subprocess.run("journalctl -p 3 -n 5 --no-pager -o json", shell=Test, capture_output=True, text=True)
                   return [json.loads(line) for line in res.stdout.strip().split('\n') if line]
               except Exception:
                   return []
