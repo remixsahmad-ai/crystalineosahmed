@@ -1,4 +1,4 @@
-name: Build Crystalline OS ISO (Final Fixed)
+name: Build Crystalline OS ISO (Keyring Fixed)
 
 on:
   workflow_dispatch:
@@ -10,18 +10,18 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Prepare Loop Devices & Deep Dependencies
+      - name: Prepare Loop Devices & Debian Keyrings
         run: |
           sudo modprobe loop
           sudo apt-get update
-          sudo apt-get install -y live-build debootstrap xorriso squashfs-tools mtools librsvg2-bin flatpak-builder git
+          sudo apt-get install -y live-build debootstrap xorriso squashfs-tools mtools librsvg2-bin flatpak-builder git debian-archive-keyring debian-keyring
           for i in {0..7}; do
             if [ ! -e /dev/loop$i ]; then
               sudo mknod -m 0660 /dev/loop$i b 7 $i
             fi
           done
 
-      - name: Setup Build Configuration (Debian Mirrors)
+      - name: Setup Build Configuration
         run: |
           mkdir -p iso-build
           cd iso-build
