@@ -1,4 +1,4 @@
-name: Build Crystalline OS ISO (Keyring Fixed)
+name: Build Crystalline OS ISO (Security Mirror Fixed)
 
 on:
   workflow_dispatch:
@@ -29,8 +29,10 @@ jobs:
                     --distribution bookworm \
                     --mirror-bootstrap "http://deb.debian.org/debian/" \
                     --mirror-chroot "http://deb.debian.org/debian/" \
+                    --mirror-security "http://deb.debian.org/debian-security/" \
                     --parent-mirror-bootstrap "http://deb.debian.org/debian/" \
                     --parent-mirror-chroot "http://deb.debian.org/debian/" \
+                    --parent-mirror-security "http://deb.debian.org/debian-security/" \
                     --archive-areas "main contrib non-free non-free-firmware" \
                     --bootloader grub-efi \
                     --debian-installer false
