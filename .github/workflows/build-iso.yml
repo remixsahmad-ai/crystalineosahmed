@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: crystalline-iso-build
+  group: crystalline-os-build
   cancel-in-progress: false
 
 jobs:
@@ -23,7 +23,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Update Ubuntu and Debian signing keyring
+      - name: Update signing keyring
         run: |
           set -euxo pipefail
           sudo apt-get update
@@ -31,9 +31,6 @@ jobs:
             debian-archive-keyring \
             ca-certificates \
             gnupg
-          sudo apt-get install -y --only-upgrade \
-            debian-archive-keyring || true
-
           test -s /usr/share/keyrings/debian-archive-keyring.gpg
 
       - name: Install build dependencies
@@ -60,6 +57,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+
           mkdir -p iso
           cd iso
 
@@ -79,8 +77,15 @@ jobs:
             --apt-recommends true \
             --bootappend-live "boot=live components username=crystalline hostname=crystalline"
 
-          mkdir -p config/package-lists
-          cat > config/package-lists/crystalline.list.chroot <<'PACKAGES'
+          # Create all configuration directories with safe permissions.
+          sudo install -d \
+            config/package-lists \
+            config/includes.chroot/etc/skel/.config \
+            config/includes.chroot/usr/share/icons/crystalline \
+            config/includes.chroot/usr/local/bin
+
+          # Package list: use sudo tee to avoid Permission denied.
+          sudo tee config/package-lists/crystalline.list.chroot > /dev/null <<'PACKAGES'
           live-boot
           systemd-sysv
           sudo
@@ -123,18 +128,7 @@ jobs:
           coreutils
           PACKAGES
 
-      - name: Install Crystalline theme and AI helper
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd iso
-
-          mkdir -p \
-            config/includes.chroot/usr/share/icons/crystalline \
-            config/includes.chroot/etc/skel/.config \
-            config/includes.chroot/usr/local/bin
-
-          cat > config/includes.chroot/etc/skel/.config/kdeglobals <<'EOF'
+          sudo tee config/includes.chroot/etc/skel/.config/kdeglobals > /dev/null <<'EOF'
           [General]
           ColorScheme=BreezeDark
           Name=Crystalline
@@ -144,12 +138,12 @@ jobs:
           widgetStyle=Breeze
           EOF
 
-          cat > config/includes.chroot/etc/skel/.config/kwinrc <<'EOF'
+          sudo tee config/includes.chroot/etc/skel/.config/kwinrc > /dev/null <<'EOF'
           [Plugins]
           blurEnabled=true
           EOF
 
-          cat > config/includes.chroot/usr/share/icons/crystalline/crystalline-x.svg <<'EOF'
+          sudo tee config/includes.chroot/usr/share/icons/crystalline/crystalline-x.svg > /dev/null <<'EOF'
           <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
             <defs>
               <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
@@ -162,7 +156,7 @@ jobs:
           </svg>
           EOF
 
-          cat > config/includes.chroot/usr/local/bin/crystalline-ai <<'PY'
+          sudo tee config/includes.chroot/usr/local/bin/crystalline-ai > /dev/null <<'PY'
           #!/usr/bin/python3
           import os
           import sys
@@ -173,7 +167,7 @@ jobs:
           def main():
               prompt = " ".join(sys.argv[1:]).strip()
               if not prompt:
-                  print("Usage: crystalline-ai 'describe the problem'")
+                  print("Usage: crystalline-ai 'describe your problem'")
                   print("Set GEMINI_API_KEY or ANTHROPIC_API_KEY first.")
                   return 2
 
@@ -183,8 +177,7 @@ jobs:
               if gemini:
                   url = (
                       "https://generativelanguage.googleapis.com/v1beta/"
-                      "models/gemini-2.5-flash:generateContent"
-                      "?key=" + gemini
+                      "models/gemini-2.5-flash:generateContent?key=" + gemini
                   )
                   payload = {
                       "contents": [{"parts": [{"text": prompt}]}]
@@ -228,20 +221,25 @@ jobs:
               except (urllib.error.URLError, KeyError, ValueError) as error:
                   print("AI request failed:", error)
                   return 1
+
               return 0
 
           if __name__ == "__main__":
               sys.exit(main())
           PY
 
-          chmod +x \
-            config/includes.chroot/usr/local/bin/crystalline-ai
+          sudo chmod +x config/includes.chroot/usr/local/bin/crystalline-ai
 
-          cat > config/includes.chroot/etc/motd <<'EOF'
+          sudo tee config/includes.chroot/etc/motd > /dev/null <<'EOF'
           Welcome to Crystalline OS
           Debian Live | KDE Plasma | Dark crystalline desktop
           AI helper: crystalline-ai "describe your problem"
           EOF
+
+          # Verify that the critical configuration files exist.
+          sudo test -s config/package-lists/crystalline.list.chroot
+          sudo test -s config/includes.chroot/usr/local/bin/crystalline-ai
+          sudo test -x /usr/bin/env
 
       - name: Build ISO
         shell: bash
@@ -249,29 +247,13 @@ jobs:
           set -Eeuo pipefail
           cd iso
 
-          # Remove remnants from any incomplete build.
-          sudo lb clean --purge || true
-
-          # Reapply the configuration after cleaning.
-          sudo lb config \
-            --mode debian \
-            --distribution bookworm \
-            --architectures amd64 \
-            --binary-images iso-hybrid \
-            --debian-installer false \
-            --archive-areas "main contrib non-free non-free-firmware" \
-            --mirror-bootstrap https://deb.debian.org/debian \
-            --mirror-chroot https://deb.debian.org/debian \
-            --mirror-binary https://deb.debian.org/debian \
-            --keyring-packages debian-archive-keyring \
-            --apt-recommends true \
-            --bootappend-live "boot=live components username=crystalline hostname=crystalline"
-
+          # Do not clean or reconfigure here: keep the prepared files.
           sudo lb build 2>&1 | tee ../build.log
 
-          ISO_PATH="$(find . -maxdepth 1 -type f -name '*.iso' -print -quit)"
+          ISO_PATH="$(sudo find . -maxdepth 1 -type f -name '*.iso' -print -quit)"
+
           if [ -z "$ISO_PATH" ]; then
-            echo "ERROR: Build finished without producing an ISO."
+            echo "ERROR: No ISO file was generated."
             exit 1
           fi
 
