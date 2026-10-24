@@ -58,6 +58,8 @@ jobs:
 
           sudo lb clean --purge || true
 
+          # NOTE: --security false avoids the broken "bookworm/updates" entry.
+          # The correct security repo (bookworm-security) is added manually below.
           sudo lb config \
             --mode debian \
             --distribution bookworm \
@@ -68,9 +70,15 @@ jobs:
             --mirror-bootstrap https://deb.debian.org/debian \
             --mirror-chroot https://deb.debian.org/debian \
             --mirror-binary https://deb.debian.org/debian \
+            --security false \
             --keyring-packages debian-archive-keyring \
             --apt-recommends true \
             --bootappend-live "boot=live components username=crystalline hostname=crystalline"
+
+          # Correct security repository for Debian 12 (bookworm)
+          sudo install -d config/archives
+          echo "deb https://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware" | \
+            sudo tee config/archives/security.list.chroot > /dev/null
 
       - name: Configure packages and desktop
         shell: bash
@@ -185,7 +193,7 @@ jobs:
               elif claude:
                   url = "https://api.anthropic.com/v1/messages"
                   payload = {
-                      "model": "claude-sonnet-4-20250514",
+                      "model": "claude-sonnet-4-6",
                       "max_tokens": 1200,
                       "messages": [{"role": "user", "content": prompt}]
                   }
@@ -235,6 +243,7 @@ jobs:
 
           sudo test -s config/package-lists/crystalline.list.chroot
           sudo test -x config/includes.chroot/usr/local/bin/crystalline-ai
+          sudo test -s config/archives/security.list.chroot
 
       - name: Build ISO
         shell: bash
