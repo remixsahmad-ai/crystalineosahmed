@@ -42,6 +42,8 @@ jobs:
             dosfstools \
             grub-pc-bin \
             grub-efi-amd64-bin \
+            isolinux \
+            syslinux-common \
             file \
             rsync \
             python3-yaml
@@ -54,12 +56,11 @@ jobs:
           set -Eeuo pipefail
           SCRIPT="$(dpkg -L live-build | grep -E '/lb_chroot_linux-image$' | head -n 1 || true)"
           if [ -z "$SCRIPT" ] || [ ! -f "$SCRIPT" ]; then
-            echo "ERROR: Could not locate live-build's kernel-image helper."
+            echo "ERROR: Could not locate live-build helper."
             dpkg -L live-build | grep -Ei 'linux.*image|linux_image' || true
             exit 1
           fi
-          echo "Inspecting live-build helper: $SCRIPT"
-          grep -n -C 3 'Contents-' "$SCRIPT" || true
+
           sudo python3 - "$SCRIPT" <<'PYCODE'
           from pathlib import Path
           import re
@@ -67,24 +68,22 @@ jobs:
 
           path = Path(sys.argv[1])
           source = path.read_text()
-          original = source
-          # live-build versions construct this URL in slightly different ways.
-          # Add the main component directory immediately before Contents-.
-          source = re.sub(r'(?<![A-Za-z0-9_-])Contents-', 'main/Contents-', source)
-          # Avoid accidental duplicate insertion if the file already has main/.
-          source = source.replace('main/main/Contents-', 'main/Contents-')
-          if source == original:
-              print('ERROR: No Contents- URL was found to patch.')
+          updated = re.sub(r'(?<![A-Za-z0-9_-])Contents-', 'main/Contents-', source)
+          updated = updated.replace('main/main/Contents-', 'main/Contents-')
+
+          if updated == source:
+              print("No Contents- string found; no patch was applied.")
+              print("Relevant lines:")
+              for line in source.splitlines():
+                  if "Contents" in line:
+                      print(line)
               raise SystemExit(1)
-          path.write_text(source)
-          print('Patched live-build helper: Contents index now includes main/.')
+
+          path.write_text(updated)
+          print("Patched:", path)
           PYCODE
-          echo "Verifying patch:"
+
           grep -n -C 2 'Contents-' "$SCRIPT"
-          if ! grep -q 'main/Contents-' "$SCRIPT"; then
-            echo "ERROR: Contents URL patch verification failed."
-            exit 1
-          fi
 
       - name: Configure Crystalline OS
         shell: bash
@@ -95,6 +94,7 @@ jobs:
 
           sudo lb clean --purge || true
           sudo rm -rf config
+
           sudo lb config \
             --mode debian \
             --distribution bookworm \
@@ -105,7 +105,6 @@ jobs:
             --mirror-bootstrap https://deb.debian.org/debian \
             --mirror-chroot https://deb.debian.org/debian \
             --mirror-binary https://deb.debian.org/debian \
-            --security false \
             --keyring-packages debian-archive-keyring \
             --apt-recommends true \
             --bootappend-live "boot=live components username=crystalline hostname=crystalline"
@@ -117,22 +116,21 @@ jobs:
             config/apt \
             config/archives \
             config/hooks/normal \
+            config/includes.chroot/root/isolinux \
             config/includes.chroot/etc/skel/.config \
             config/includes.chroot/usr/local/bin \
             config/includes.chroot/usr/local/sbin \
             config/includes.chroot/usr/share/applications \
             config/includes.chroot/usr/share/icons/crystalline
 
-          # Use the current Debian Bookworm security suite explicitly.
-          # This avoids live-build generating the obsolete bookworm/updates URL.
           cat > config/archives/crystalline-security.list.chroot <<'EOF'
           deb https://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
           EOF
+
           cat > config/archives/crystalline-security.list.binary <<'EOF'
           deb https://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
           EOF
 
-          # Disable optional Contents indexes; no patching of system live-build scripts.
           cat > config/apt/apt.conf.chroot <<'EOF'
           Acquire::IndexTargets::deb::Contents-deb::DefaultEnabled "false";
           Acquire::IndexTargets::deb::Contents-udeb::DefaultEnabled "false";
@@ -188,8 +186,6 @@ jobs:
           weston
           EOF
 
-          # Install Waydroid in the target system. Android image initialization
-          # is deferred until the user runs the setup utility on first boot.
           cat > config/hooks/normal/0900-install-waydroid.hook.chroot <<'HOOK'
           #!/bin/bash
           set -Eeuo pipefail
@@ -367,6 +363,25 @@ jobs:
           Android: Crystalline Android Setup
           EOF
 
+          # Copy the ISOLINUX files into the live chroot's /root path.
+          ISOLINUX_BIN="$(dpkg -L isolinux | grep -E '/isolinux\.bin$' | head -n 1 || true)"
+          VESAMENU="$(dpkg -L syslinux-common | grep -E '/vesamenu\.c32$' | head -n 1 || true)"
+
+          if [ -z "$ISOLINUX_BIN" ] || [ ! -f "$ISOLINUX_BIN" ]; then
+            echo "ERROR: isolinux.bin not found."
+            dpkg -L isolinux || true
+            exit 1
+          fi
+
+          if [ -z "$VESAMENU" ] || [ ! -f "$VESAMENU" ]; then
+            echo "ERROR: vesamenu.c32 not found."
+            dpkg -L syslinux-common | grep -E '\.c32$' || true
+            exit 1
+          fi
+
+          install -m 0644 "$ISOLINUX_BIN" config/includes.chroot/root/isolinux/isolinux.bin
+          install -m 0644 "$VESAMENU" config/includes.chroot/root/isolinux/vesamenu.c32
+
           sudo chown -R "$(id -u):$(id -g)" config
 
       - name: Validate workflow and configuration
@@ -376,11 +391,15 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import yaml
+
           p = Path(".github/workflows/build-iso.yml")
           yaml.safe_load(p.read_text())
           print("Workflow YAML syntax: OK")
           PY
+
           test -s iso/config/package-lists/crystalline.list.chroot
+          test -s iso/config/includes.chroot/root/isolinux/isolinux.bin
+          test -s iso/config/includes.chroot/root/isolinux/vesamenu.c32
           ! grep -R -n 'bookworm/updates' iso/config
           bash -n iso/config/hooks/normal/0900-install-waydroid.hook.chroot
           bash -n iso/config/includes.chroot/usr/local/sbin/crystalline-android-setup
@@ -394,10 +413,12 @@ jobs:
           set -Eeuo pipefail
           cd iso
           sudo chown -R "$(id -u):$(id -g)" config
+
           set +e
           sudo lb build 2>&1 | tee ../build.log
           BUILD_STATUS=${PIPESTATUS[0]}
           set -e
+
           if [ "$BUILD_STATUS" -ne 0 ]; then
             echo "ERROR: live-build failed with exit code $BUILD_STATUS."
             echo "Last 120 lines of build log:"
@@ -410,6 +431,7 @@ jobs:
             echo "ERROR: Build finished without producing an ISO."
             exit 1
           fi
+
           sudo cp "$ISO_PATH" ../Crystalline-OS-amd64.iso
           sudo chown "$(id -u):$(id -g)" ../Crystalline-OS-amd64.iso
           file ../Crystalline-OS-amd64.iso
