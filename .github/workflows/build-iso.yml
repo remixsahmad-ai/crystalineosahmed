@@ -1,9 +1,8 @@
-name: Build Crystalline OS
+name: Build Crystalline OS ISO
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
     paths:
       - ".github/workflows/build-iso.yml"
 
@@ -11,320 +10,282 @@ permissions:
   contents: read
 
 concurrency:
-  group: crystalline-os-build
-  cancel-in-progress: true
+  group: crystalline-iso-build
+  cancel-in-progress: false
 
 jobs:
   build:
     name: Build Debian Live ISO
-    runs-on: ubuntu-22.04
-    timeout-minutes: 240
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build tools
-        shell: bash
+      - name: Update Ubuntu and Debian signing keyring
         run: |
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y \
+            debian-archive-keyring \
+            ca-certificates \
+            gnupg
+          sudo apt-get install -y --only-upgrade \
+            debian-archive-keyring || true
+
+          test -s /usr/share/keyrings/debian-archive-keyring.gpg
+
+      - name: Install build dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get install -y \
             live-build \
             debootstrap \
+            coreutils \
             xorriso \
             squashfs-tools \
             mtools \
             dosfstools \
             grub-pc-bin \
             grub-efi-amd64-bin \
-            debian-archive-keyring \
-            ca-certificates \
-            file
+            file \
+            rsync
+
+          test -x /usr/bin/env
+          lb --version
+          debootstrap --version
 
       - name: Configure Crystalline OS
         shell: bash
         run: |
           set -euxo pipefail
-
           mkdir -p iso
           cd iso
 
-          lb config \
+          sudo lb clean --purge || true
+
+          sudo lb config \
             --mode debian \
-            --architecture amd64 \
             --distribution bookworm \
-            --archive-areas "main contrib non-free non-free-firmware" \
+            --architectures amd64 \
             --binary-images iso-hybrid \
             --debian-installer false \
+            --archive-areas "main contrib non-free non-free-firmware" \
+            --mirror-bootstrap https://deb.debian.org/debian \
+            --mirror-chroot https://deb.debian.org/debian \
+            --mirror-binary https://deb.debian.org/debian \
+            --keyring-packages debian-archive-keyring \
             --apt-recommends true \
-            --apt-indices false \
-            --memtest none \
-            --bootappend-live "boot=live components quiet splash"
+            --bootappend-live "boot=live components username=crystalline hostname=crystalline"
 
-      - name: Add desktop and compatibility packages
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          mkdir -p iso/config/package-lists
-
-          cat > iso/config/package-lists/crystalline.list.chroot <<'EOF'
+          mkdir -p config/package-lists
+          cat > config/package-lists/crystalline.list.chroot <<'PACKAGES'
+          live-boot
+          systemd-sysv
+          sudo
+          dbus
           kde-plasma-desktop
           sddm
           network-manager
+          plasma-nm
+          konsole
+          dolphin
+          kate
+          ark
+          firefox-esr
+          flatpak
           pipewire
           wireplumber
           pavucontrol
-          konsole
-          dolphin
-          firefox-esr
-          flatpak
-          python3
-          python3-venv
-          python3-pip
-          git
-          curl
-          wget
-          ca-certificates
           fonts-noto-core
-          fonts-noto-extra
           fonts-noto-ui-core
-          fonts-noto-ui-extra
+          fonts-noto-extra
           fonts-noto-color-emoji
+          fonts-noto-cjk
           fontconfig
+          locales
+          desktop-base
+          qemu-system-x86
+          qemu-utils
+          virt-manager
           wine
           wine64
           winetricks
-          qemu-system-x86
-          qemu-utils
-          ovmf
-          virt-manager
-          libvirt-daemon-system
-          libvirt-clients
-          spice-vdagent
-          EOF
+          python3
+          python3-requests
+          curl
+          ca-certificates
+          git
+          htop
+          unzip
+          p7zip-full
+          coreutils
+          PACKAGES
 
       - name: Install Crystalline theme and AI helper
         shell: bash
         run: |
           set -euxo pipefail
-
-          BASE="iso/config/includes.chroot"
+          cd iso
 
           mkdir -p \
-            "$BASE/etc/fonts/conf.d" \
-            "$BASE/etc/skel/.config" \
-            "$BASE/etc/skel/Desktop" \
-            "$BASE/usr/local/bin" \
-            "$BASE/usr/share/icons/hicolor/scalable/apps" \
-            "$BASE/etc/crystalline"
+            config/includes.chroot/usr/share/icons/crystalline \
+            config/includes.chroot/etc/skel/.config \
+            config/includes.chroot/usr/local/bin
 
-          # Prefer a redistributable Arabic font with a clean,
-          # Apple-inspired appearance.
-          cat > "$BASE/etc/fonts/conf.d/60-crystalline-arabic.conf" <<'EOF'
-          <?xml version="1.0"?>
-          <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
-          <fontconfig>
-            <match>
-              <test name="lang" compare="contains">
-                <string>ar</string>
-              </test>
-              <edit name="family" mode="prepend" binding="strong">
-                <string>Noto Sans Arabic</string>
-              </edit>
-            </match>
-            <alias>
-              <family>sans-serif</family>
-              <prefer>
-                <family>Noto Sans Arabic</family>
-                <family>Noto Sans</family>
-                <family>DejaVu Sans</family>
-              </prefer>
-            </alias>
-          </fontconfig>
-          EOF
-
-          # Default KDE fonts for newly created users.
-          cat > "$BASE/etc/skel/.config/kdeglobals" <<'EOF'
+          cat > config/includes.chroot/etc/skel/.config/kdeglobals <<'EOF'
           [General]
+          ColorScheme=BreezeDark
+          Name=Crystalline
           font=Noto Sans Arabic,10,-1,5,50,0,0,0,0,0
           menuFont=Noto Sans Arabic,10,-1,5,50,0,0,0,0,0
-          smallestReadableFont=Noto Sans Arabic,9,-1,5,50,0,0,0,0,0
           toolBarFont=Noto Sans Arabic,10,-1,5,50,0,0,0,0,0
-
-          [WM]
-          activeFont=Noto Sans Arabic,10,-1,5,50,0,0,0,0,0
+          widgetStyle=Breeze
           EOF
 
-          # Dark appearance and KWin blur preference.
-          cat > "$BASE/etc/skel/.config/kwinrc" <<'EOF'
-          [Compositing]
-          Enabled=true
-          Backend=OpenGL
-
+          cat > config/includes.chroot/etc/skel/.config/kwinrc <<'EOF'
           [Plugins]
           blurEnabled=true
           EOF
 
-          # Crystalline X icon.
-          cat > "$BASE/usr/share/icons/hicolor/scalable/apps/crystalline-x.svg" <<'EOF'
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-            <rect width="100" height="100" rx="22" fill="#15171b"/>
-            <path d="M27 27 L73 73 M73 27 L27 73"
-              stroke="#00e676" stroke-width="10" stroke-linecap="round"/>
-            <path d="M27 27 L73 73 M73 27 L27 73"
-              stroke="#b9ffd8" stroke-opacity=".4"
-              stroke-width="2" stroke-linecap="round"/>
+          cat > config/includes.chroot/usr/share/icons/crystalline/crystalline-x.svg <<'EOF'
+          <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+            <defs>
+              <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#8cffb0"/>
+                <stop offset="1" stop-color="#00a85a"/>
+              </linearGradient>
+            </defs>
+            <rect x="4" y="4" width="120" height="120" rx="26" fill="#20252b" fill-opacity=".94" stroke="#a8ffca" stroke-opacity=".8" stroke-width="2"/>
+            <path d="M37 30 L64 53 L91 30 L101 40 L77 64 L101 88 L91 98 L64 75 L37 98 L27 88 L51 64 L27 40 Z" fill="url(#g)"/>
           </svg>
           EOF
 
-          # Safe API client: sends prompts to either provider.
-          # It never executes returned commands.
-          cat > "$BASE/usr/local/bin/crystalline-ai" <<'PYEOF'
+          cat > config/includes.chroot/usr/local/bin/crystalline-ai <<'PY'
           #!/usr/bin/python3
-          import json
           import os
           import sys
-          import urllib.error
+          import json
           import urllib.request
+          import urllib.error
 
-          def post(url, headers, payload):
+          def main():
+              prompt = " ".join(sys.argv[1:]).strip()
+              if not prompt:
+                  print("Usage: crystalline-ai 'describe the problem'")
+                  print("Set GEMINI_API_KEY or ANTHROPIC_API_KEY first.")
+                  return 2
+
+              gemini = os.environ.get("GEMINI_API_KEY")
+              claude = os.environ.get("ANTHROPIC_API_KEY")
+
+              if gemini:
+                  url = (
+                      "https://generativelanguage.googleapis.com/v1beta/"
+                      "models/gemini-2.5-flash:generateContent"
+                      "?key=" + gemini
+                  )
+                  payload = {
+                      "contents": [{"parts": [{"text": prompt}]}]
+                  }
+                  headers = {"Content-Type": "application/json"}
+              elif claude:
+                  url = "https://api.anthropic.com/v1/messages"
+                  payload = {
+                      "model": "claude-sonnet-4-20250514",
+                      "max_tokens": 1200,
+                      "messages": [
+                          {"role": "user", "content": prompt}
+                      ]
+                  }
+                  headers = {
+                      "Content-Type": "application/json",
+                      "x-api-key": claude,
+                      "anthropic-version": "2023-06-01"
+                  }
+              else:
+                  print("Configure GEMINI_API_KEY or ANTHROPIC_API_KEY.")
+                  return 2
+
               request = urllib.request.Request(
                   url,
                   data=json.dumps(payload).encode(),
-                  headers={
-                      **headers,
-                      "Content-Type": "application/json"
-                  },
+                  headers=headers,
                   method="POST"
               )
+
               try:
-                  with urllib.request.urlopen(request, timeout=45) as r:
-                      return json.loads(r.read().decode())
-              except urllib.error.HTTPError as e:
-                  detail = e.read().decode(errors="replace")
-                  raise RuntimeError(
-                      f"API HTTP {e.code}: {detail[:500]}"
-                  )
+                  with urllib.request.urlopen(request, timeout=60) as response:
+                      result = json.loads(response.read().decode())
 
-          def ask(provider, prompt):
-              if provider == "gemini":
-                  key = os.environ.get("GEMINI_API_KEY")
-                  if not key:
-                      raise RuntimeError("GEMINI_API_KEY is not set")
-                  model = os.environ.get(
-                      "GEMINI_MODEL", "gemini-2.5-flash"
-                  )
-                  url = (
-                      "https://generativelanguage.googleapis.com/"
-                      "v1beta/models/" + model +
-                      ":generateContent?key=" + key
-                  )
-                  data = post(url, {}, {
-                      "contents": [{
-                          "parts": [{"text": prompt}]
-                      }],
-                      "generationConfig": {
-                          "temperature": 0.2,
-                          "maxOutputTokens": 1500
-                      }
-                  })
-                  return "\n".join(
-                      p.get("text", "")
-                      for c in data.get("candidates", [])
-                      for p in c.get("content", {}).get("parts", [])
-                      if p.get("text")
-                  )
-
-              if provider == "claude":
-                  key = os.environ.get("ANTHROPIC_API_KEY")
-                  if not key:
-                      raise RuntimeError("ANTHROPIC_API_KEY is not set")
-                  model = os.environ.get(
-                      "CLAUDE_MODEL", "claude-sonnet-4-20250514"
-                  )
-                  data = post(
-                      "https://api.anthropic.com/v1/messages",
-                      {
-                          "x-api-key": key,
-                          "anthropic-version": "2023-06-01"
-                      },
-                      {
-                          "model": model,
-                          "max_tokens": 1500,
-                          "messages": [{
-                              "role": "user",
-                              "content": prompt
-                          }]
-                      }
-                  )
-                  return "\n".join(
-                      x.get("text", "")
-                      for x in data.get("content", [])
-                      if x.get("type") == "text"
-                  )
-
-              raise RuntimeError("Choose gemini or claude")
-
-          def main():
-              if len(sys.argv) < 3:
-                  print(
-                      "Usage: crystalline-ai gemini|claude 'question'",
-                      file=sys.stderr
-                  )
-                  return 2
-              prompt = " ".join(sys.argv[2:])
-              if len(prompt) > 12000:
-                  print("Prompt too long", file=sys.stderr)
-                  return 2
-              try:
-                  print(ask(sys.argv[1], prompt))
-                  return 0
-              except (RuntimeError, urllib.error.URLError) as e:
-                  print("Error:", e, file=sys.stderr)
+                  if gemini:
+                      print(result["candidates"][0]["content"]["parts"][0]["text"])
+                  else:
+                      for item in result.get("content", []):
+                          if item.get("type") == "text":
+                              print(item["text"])
+              except (urllib.error.URLError, KeyError, ValueError) as error:
+                  print("AI request failed:", error)
                   return 1
+              return 0
 
           if __name__ == "__main__":
               sys.exit(main())
-          PYEOF
+          PY
 
-          chmod 0755 "$BASE/usr/local/bin/crystalline-ai"
+          chmod +x \
+            config/includes.chroot/usr/local/bin/crystalline-ai
 
-          cat > "$BASE/etc/crystalline/README.txt" <<'EOF'
-          Crystalline AI helper
-
-          Run:
-            crystalline-ai gemini "Explain this error"
-            crystalline-ai claude "Review this proposed solution"
-
-          Configure GEMINI_API_KEY and ANTHROPIC_API_KEY in your
-          local shell after installation.
-
-          Never commit API keys to GitHub or embed them in the ISO.
-          AI output is untrusted. Review commands before running them.
-          This helper does not automatically repair the system.
+          cat > config/includes.chroot/etc/motd <<'EOF'
+          Welcome to Crystalline OS
+          Debian Live | KDE Plasma | Dark crystalline desktop
+          AI helper: crystalline-ai "describe your problem"
           EOF
 
       - name: Build ISO
         shell: bash
         run: |
-          set -euxo pipefail
+          set -Eeuo pipefail
           cd iso
+
+          # Remove remnants from any incomplete build.
+          sudo lb clean --purge || true
+
+          # Reapply the configuration after cleaning.
+          sudo lb config \
+            --mode debian \
+            --distribution bookworm \
+            --architectures amd64 \
+            --binary-images iso-hybrid \
+            --debian-installer false \
+            --archive-areas "main contrib non-free non-free-firmware" \
+            --mirror-bootstrap https://deb.debian.org/debian \
+            --mirror-chroot https://deb.debian.org/debian \
+            --mirror-binary https://deb.debian.org/debian \
+            --keyring-packages debian-archive-keyring \
+            --apt-recommends true \
+            --bootappend-live "boot=live components username=crystalline hostname=crystalline"
+
           sudo lb build 2>&1 | tee ../build.log
-          ISO="$(find . -maxdepth 1 -type f -name '*.iso' -print -quit)"
-          test -n "$ISO"
-          test -s "$ISO"
-          file "$ISO"
-          sudo chown "$USER":"$USER" "$ISO"
+
+          ISO_PATH="$(find . -maxdepth 1 -type f -name '*.iso' -print -quit)"
+          if [ -z "$ISO_PATH" ]; then
+            echo "ERROR: Build finished without producing an ISO."
+            exit 1
+          fi
+
+          sudo cp "$ISO_PATH" ../Crystalline-OS-amd64.iso
+          sudo chown "$(id -u):$(id -g)" ../Crystalline-OS-amd64.iso
+          file ../Crystalline-OS-amd64.iso
 
       - name: Upload ISO and build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Crystalline-OS-ISO
+          name: crystalline-os-build
           path: |
-            iso/*.iso
+            Crystalline-OS-amd64.iso
             build.log
           if-no-files-found: warn
           retention-days: 7
