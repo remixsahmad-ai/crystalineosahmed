@@ -73,6 +73,8 @@ jobs:
             --security false \
             --keyring-packages debian-archive-keyring \
             --apt-recommends true \
+            --linux-flavours "amd64" \
+            --linux-packages "linux-image" \
             --bootappend-live "boot=live components username=crystalline hostname=crystalline"
 
           # Correct security repository for Debian 12 (bookworm)
@@ -93,6 +95,7 @@ jobs:
             config/includes.chroot/usr/share/icons/crystalline
 
           sudo tee config/package-lists/crystalline.list.chroot > /dev/null <<'PACKAGES'
+          linux-image-amd64
           live-boot
           systemd-sysv
           sudo
