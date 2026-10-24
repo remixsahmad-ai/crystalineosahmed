@@ -23,18 +23,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Update signing keys and dependencies
+      - name: Install build dependencies
         shell: bash
         run: |
-          set -euxo pipefail
+          set -Eeuo pipefail
+
           sudo apt-get update
           sudo apt-get install -y \
-            debian-archive-keyring \
-            ca-certificates \
-            gnupg \
-            curl \
             live-build \
             debootstrap \
+            debian-archive-keyring \
+            ca-certificates \
+            curl \
+            gnupg \
             coreutils \
             xorriso \
             squashfs-tools \
@@ -52,7 +53,8 @@ jobs:
       - name: Configure Crystalline OS
         shell: bash
         run: |
-          set -euxo pipefail
+          set -Eeuo pipefail
+
           mkdir -p iso
           cd iso
 
@@ -72,10 +74,21 @@ jobs:
             --apt-recommends true \
             --bootappend-live "boot=live components username=crystalline hostname=crystalline"
 
-          mkdir -p config/package-lists config/apt
+          # FIX: lb config runs as root, so restore ownership before
+          # creating package lists, hooks, and included files.
+          sudo chown -R "$(id -u):$(id -g)" config
+
+          mkdir -p \
+            config/package-lists \
+            config/apt \
+            config/hooks/normal \
+            config/includes.chroot/etc/skel/.config \
+            config/includes.chroot/usr/local/bin \
+            config/includes.chroot/usr/local/sbin \
+            config/includes.chroot/usr/share/applications \
+            config/includes.chroot/usr/share/icons/crystalline
 
           # Disable optional Contents indexes.
-          # These indexes are not needed to install the requested packages.
           cat > config/apt/apt.conf.chroot <<'APTCONF'
           Acquire::IndexTargets::deb::Contents-deb::DefaultEnabled "false";
           Acquire::IndexTargets::deb::Contents-udeb::DefaultEnabled "false";
@@ -131,24 +144,17 @@ jobs:
           weston
           APTCONF
 
-      - name: Prepare Waydroid installation
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd iso
+          # Verify that the package list is not empty and is well formed.
+          test -s config/package-lists/crystalline.list.chroot
 
-          mkdir -p \
-            config/hooks/normal \
-            config/includes.chroot/etc/skel/.config \
-            config/includes.chroot/etc/skel/.local/share/applications \
-            config/includes.chroot/usr/local/bin \
-            config/includes.chroot/usr/local/sbin \
-            config/includes.chroot/usr/share/applications \
-            config/includes.chroot/usr/share/icons/crystalline \
-            config/includes.chroot/etc/systemd/system
+          # Correct the package list terminator if necessary.
+          # The heredoc above is deliberately checked below.
+          if grep -qx 'APTCONF' config/package-lists/crystalline.list.chroot; then
+            sed -i '$d' config/package-lists/crystalline.list.chroot
+          fi
 
-          # Install Waydroid in the target filesystem.
-          # Android images are initialized separately on first boot.
+          # Install the official Waydroid repository and package inside
+          # the target chroot, not on the GitHub Actions runner.
           cat > config/hooks/normal/0900-install-waydroid.hook.chroot <<'HOOK'
           #!/bin/bash
           set -Eeuo pipefail
@@ -171,89 +177,6 @@ jobs:
           HOOK
 
           chmod +x config/hooks/normal/0900-install-waydroid.hook.chroot
-
-          # Configure Crystalline first-run Android setup.
-          cat > config/includes.chroot/usr/local/sbin/crystalline-android-setup <<'SETUP'
-          #!/bin/bash
-          set -Eeuo pipefail
-
-          if [ "$(id -u)" -ne 0 ]; then
-            echo "Run this command with sudo."
-            exit 1
-          fi
-
-          if ! command -v waydroid >/dev/null 2>&1; then
-            echo "Waydroid is not installed."
-            exit 1
-          fi
-
-          systemctl enable --now waydroid-container
-
-          if [ ! -f /var/lib/waydroid/.crystalline-initialized ]; then
-            waydroid init -s GAPPS
-            touch /var/lib/waydroid/.crystalline-initialized
-          fi
-
-          echo "Android image initialization completed."
-          echo "Log in to Google Play if device certification is required."
-          SETUP
-
-          chmod +x \
-            config/includes.chroot/usr/local/sbin/crystalline-android-setup
-
-          cat > config/includes.chroot/usr/local/bin/crystalline-android <<'ANDROID'
-          #!/bin/bash
-          set -Eeuo pipefail
-
-          if ! command -v waydroid >/dev/null 2>&1; then
-            echo "Waydroid is not installed."
-            exit 1
-          fi
-
-          if ! systemctl is-active --quiet waydroid-container; then
-            echo "Start Android setup first:"
-            echo "sudo crystalline-android-setup"
-            exit 1
-          fi
-
-          waydroid show-full-ui
-          ANDROID
-
-          chmod +x \
-            config/includes.chroot/usr/local/bin/crystalline-android
-
-          cat > config/includes.chroot/usr/share/applications/crystalline-android-setup.desktop <<'DESKTOP'
-          [Desktop Entry]
-          Type=Application
-          Name=Crystalline Android Setup
-          Comment=Initialize Android and Google Play
-          Exec=konsole -e sudo /usr/local/sbin/crystalline-android-setup
-          Icon=phone
-          Terminal=false
-          Categories=System;
-          DESKTOP
-
-          cat > config/includes.chroot/usr/share/applications/crystalline-android.desktop <<'DESKTOP'
-          [Desktop Entry]
-          Type=Application
-          Name=Crystalline Android
-          Comment=Launch the Android environment
-          Exec=/usr/local/bin/crystalline-android
-          Icon=phone
-          Terminal=false
-          Categories=System;
-          DESKTOP
-
-      - name: Install Crystalline theme and AI helper
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd iso
-
-          mkdir -p \
-            config/includes.chroot/usr/share/icons/crystalline \
-            config/includes.chroot/etc/skel/.config \
-            config/includes.chroot/usr/local/bin
 
           cat > config/includes.chroot/etc/skel/.config/kdeglobals <<'EOF'
           [General]
@@ -316,9 +239,7 @@ jobs:
                   payload = {
                       "model": "claude-sonnet-4-20250514",
                       "max_tokens": 1200,
-                      "messages": [
-                          {"role": "user", "content": prompt}
-                      ]
+                      "messages": [{"role": "user", "content": prompt}]
                   }
                   headers = {
                       "Content-Type": "application/json",
@@ -355,8 +276,74 @@ jobs:
               sys.exit(main())
           PY
 
-          chmod +x \
-            config/includes.chroot/usr/local/bin/crystalline-ai
+          chmod +x config/includes.chroot/usr/local/bin/crystalline-ai
+
+          cat > config/includes.chroot/usr/local/sbin/crystalline-android-setup <<'SETUP'
+          #!/bin/bash
+          set -Eeuo pipefail
+
+          if [ "$(id -u)" -ne 0 ]; then
+            echo "Run with sudo: sudo crystalline-android-setup"
+            exit 1
+          fi
+
+          if ! command -v waydroid >/dev/null 2>&1; then
+            echo "Waydroid is not installed."
+            exit 1
+          fi
+
+          systemctl enable --now waydroid-container
+
+          if [ ! -f /var/lib/waydroid/.crystalline-initialized ]; then
+            waydroid init -s GAPPS
+            touch /var/lib/waydroid/.crystalline-initialized
+          fi
+
+          echo "Android setup finished. Google Play certification may be required."
+          SETUP
+
+          chmod +x config/includes.chroot/usr/local/sbin/crystalline-android-setup
+
+          cat > config/includes.chroot/usr/local/bin/crystalline-android <<'ANDROID'
+          #!/bin/bash
+          set -Eeuo pipefail
+
+          if ! command -v waydroid >/dev/null 2>&1; then
+            echo "Waydroid is not installed."
+            exit 1
+          fi
+
+          if ! systemctl is-active --quiet waydroid-container; then
+            echo "Run sudo crystalline-android-setup first."
+            exit 1
+          fi
+
+          waydroid show-full-ui
+          ANDROID
+
+          chmod +x config/includes.chroot/usr/local/bin/crystalline-android
+
+          cat > config/includes.chroot/usr/share/applications/crystalline-android-setup.desktop <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Crystalline Android Setup
+          Comment=Initialize Android and Google Play
+          Exec=konsole -e sudo /usr/local/sbin/crystalline-android-setup
+          Icon=phone
+          Terminal=false
+          Categories=System;
+          DESKTOP
+
+          cat > config/includes.chroot/usr/share/applications/crystalline-android.desktop <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Crystalline Android
+          Comment=Launch Android
+          Exec=/usr/local/bin/crystalline-android
+          Icon=phone
+          Terminal=false
+          Categories=System;
+          DESKTOP
 
           cat > config/includes.chroot/etc/motd <<'EOF'
           Welcome to Crystalline OS
@@ -365,23 +352,25 @@ jobs:
           Android: Crystalline Android Setup
           EOF
 
+          # Restore ownership after generating the configuration.
+          sudo chown -R "$(id -u):$(id -g)" config
+
       - name: Patch live-build Contents URL
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          # Find the script responsible for downloading Contents indexes.
           SCRIPT="$(dpkg -L live-build \
             | grep '/lb_chroot_linux-image$' \
             | head -n 1 || true)"
 
           if [ -z "$SCRIPT" ] || [ ! -f "$SCRIPT" ]; then
-            echo "No matching lb_chroot_linux-image script found."
-            echo "The Contents-index APT configuration remains enabled."
+            echo "ERROR: Cannot locate lb_chroot_linux-image."
+            dpkg -L live-build | grep 'linux-image' || true
             exit 1
           fi
 
-          echo "Inspecting: $SCRIPT"
+          echo "Inspecting $SCRIPT"
           grep -n 'Contents-' "$SCRIPT" || true
 
           # Fix the incorrect root-level Contents URL if present.
@@ -391,11 +380,10 @@ jobs:
 
           if sudo grep -Fq \
             '/dists/${LB_PARENT_DISTRIBUTION}/Contents-' "$SCRIPT"; then
-            echo "ERROR: Could not patch the Contents URL."
+            echo "ERROR: Contents URL patch did not apply."
             exit 1
           fi
 
-          echo "Contents URL patch verification:"
           sudo grep -n 'Contents-' "$SCRIPT" || true
 
       - name: Build ISO
@@ -404,8 +392,19 @@ jobs:
           set -Eeuo pipefail
           cd iso
 
-          # Do not clean again here: preserve the prepared configuration.
+          # Ensure the configuration is readable by live-build.
+          sudo chown -R "$(id -u):$(id -g)" config
+
+          # Keep the build log even if live-build fails.
+          set +e
           sudo lb build 2>&1 | tee ../build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "ERROR: live-build failed with exit code $BUILD_STATUS."
+            exit "$BUILD_STATUS"
+          fi
 
           ISO_PATH="$(find . -maxdepth 1 -type f -name '*.iso' -print -quit)"
 
