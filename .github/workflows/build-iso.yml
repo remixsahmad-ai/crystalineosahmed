@@ -28,7 +28,23 @@ jobs:
         run: |
           set -Eeuo pipefail
           sudo apt-get update
-          sudo apt-get install -y live-build debootstrap debian-archive-keyring ca-certificates curl gnupg coreutils xorriso squashfs-tools mtools dosfstools grub-pc-bin grub-efi-amd64-bin file rsync
+          sudo apt-get install -y \
+            live-build \
+            debootstrap \
+            debian-archive-keyring \
+            ca-certificates \
+            curl \
+            gnupg \
+            coreutils \
+            xorriso \
+            squashfs-tools \
+            mtools \
+            dosfstools \
+            grub-pc-bin \
+            grub-efi-amd64-bin \
+            file \
+            rsync \
+            python3-yaml
           lb --version
           debootstrap --version
 
@@ -38,8 +54,9 @@ jobs:
           set -Eeuo pipefail
           mkdir -p iso
           cd iso
-          sudo lb clean --purge || true
 
+          sudo lb clean --purge || true
+          sudo rm -rf config
           sudo lb config \
             --mode debian \
             --distribution bookworm \
@@ -50,29 +67,37 @@ jobs:
             --mirror-bootstrap https://deb.debian.org/debian \
             --mirror-chroot https://deb.debian.org/debian \
             --mirror-binary https://deb.debian.org/debian \
-            --mirror-chroot-security https://security.debian.org/debian-security \
-            --mirror-binary-security https://security.debian.org/debian-security \
+            --security false \
             --keyring-packages debian-archive-keyring \
             --apt-recommends true \
             --bootappend-live "boot=live components username=crystalline hostname=crystalline"
 
           sudo chown -R "$(id -u):$(id -g)" config
 
-          mkdir -p config/package-lists config/apt config/hooks/normal \
+          mkdir -p \
+            config/package-lists \
+            config/apt \
+            config/archives \
+            config/hooks/normal \
             config/includes.chroot/etc/skel/.config \
-            config/includes.chroot/etc/apt/sources.list.d \
             config/includes.chroot/usr/local/bin \
             config/includes.chroot/usr/local/sbin \
             config/includes.chroot/usr/share/applications \
             config/includes.chroot/usr/share/icons/crystalline
 
+          # Use the current Debian Bookworm security suite explicitly.
+          # This avoids live-build generating the obsolete bookworm/updates URL.
+          cat > config/archives/crystalline-security.list.chroot <<'EOF'
+          deb https://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
+          EOF
+          cat > config/archives/crystalline-security.list.binary <<'EOF'
+          deb https://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
+          EOF
+
+          # Disable optional Contents indexes; no patching of system live-build scripts.
           cat > config/apt/apt.conf.chroot <<'EOF'
           Acquire::IndexTargets::deb::Contents-deb::DefaultEnabled "false";
           Acquire::IndexTargets::deb::Contents-udeb::DefaultEnabled "false";
-          EOF
-
-          cat > config/includes.chroot/etc/apt/sources.list.d/crystalline-security.list <<'EOF'
-          deb https://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
           EOF
 
           cat > config/package-lists/crystalline.list.chroot <<'EOF'
@@ -125,16 +150,21 @@ jobs:
           weston
           EOF
 
+          # Install Waydroid in the target system. Android image initialization
+          # is deferred until the user runs the setup utility on first boot.
           cat > config/hooks/normal/0900-install-waydroid.hook.chroot <<'HOOK'
           #!/bin/bash
           set -Eeuo pipefail
           export DEBIAN_FRONTEND=noninteractive
+
           apt-get update
           apt-get install -y curl ca-certificates
+
           curl -fsSL https://repo.waydro.id -o /tmp/waydroid-repo-installer
           bash /tmp/waydroid-repo-installer bookworm
           apt-get update
           apt-get install -y waydroid
+
           command -v waydroid
           rm -f /tmp/waydroid-repo-installer
           apt-get clean
@@ -158,7 +188,12 @@ jobs:
 
           cat > config/includes.chroot/usr/share/icons/crystalline/crystalline-x.svg <<'EOF'
           <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
-            <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8cffb0"/><stop offset="1" stop-color="#00a85a"/></linearGradient></defs>
+            <defs>
+              <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#8cffb0"/>
+                <stop offset="1" stop-color="#00a85a"/>
+              </linearGradient>
+            </defs>
             <rect x="4" y="4" width="120" height="120" rx="26" fill="#20252b" fill-opacity=".94" stroke="#a8ffca" stroke-opacity=".8" stroke-width="2"/>
             <path d="M37 30 L64 53 L91 30 L101 40 L77 64 L101 88 L91 98 L64 75 L37 98 L27 88 L51 64 L27 40 Z" fill="url(#g)"/>
           </svg>
@@ -166,27 +201,51 @@ jobs:
 
           cat > config/includes.chroot/usr/local/bin/crystalline-ai <<'PY'
           #!/usr/bin/python3
-          import os, sys, json, urllib.request, urllib.error
+          import os
+          import sys
+          import json
+          import urllib.request
+          import urllib.error
+
           def main():
               prompt = " ".join(sys.argv[1:]).strip()
               if not prompt:
                   print("Usage: crystalline-ai 'describe the problem'")
                   print("Set GEMINI_API_KEY or ANTHROPIC_API_KEY first.")
                   return 2
+
               gemini = os.environ.get("GEMINI_API_KEY")
               claude = os.environ.get("ANTHROPIC_API_KEY")
+
               if gemini:
-                  url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + gemini
+                  url = (
+                      "https://generativelanguage.googleapis.com/v1beta/"
+                      "models/gemini-2.5-flash:generateContent?key=" + gemini
+                  )
                   payload = {"contents": [{"parts": [{"text": prompt}]}]}
                   headers = {"Content-Type": "application/json"}
               elif claude:
                   url = "https://api.anthropic.com/v1/messages"
-                  payload = {"model": "claude-sonnet-4-20250514", "max_tokens": 1200, "messages": [{"role": "user", "content": prompt}]}
-                  headers = {"Content-Type": "application/json", "x-api-key": claude, "anthropic-version": "2023-06-01"}
+                  payload = {
+                      "model": "claude-sonnet-4-20250514",
+                      "max_tokens": 1200,
+                      "messages": [{"role": "user", "content": prompt}]
+                  }
+                  headers = {
+                      "Content-Type": "application/json",
+                      "x-api-key": claude,
+                      "anthropic-version": "2023-06-01"
+                  }
               else:
                   print("Configure GEMINI_API_KEY or ANTHROPIC_API_KEY.")
                   return 2
-              request = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers, method="POST")
+
+              request = urllib.request.Request(
+                  url,
+                  data=json.dumps(payload).encode(),
+                  headers=headers,
+                  method="POST"
+              )
               try:
                   with urllib.request.urlopen(request, timeout=60) as response:
                       result = json.loads(response.read().decode())
@@ -200,6 +259,7 @@ jobs:
                   print("AI request failed:", error)
                   return 1
               return 0
+
           if __name__ == "__main__":
               sys.exit(main())
           PY
@@ -212,7 +272,10 @@ jobs:
             echo "Run with sudo: sudo crystalline-android-setup"
             exit 1
           fi
-          command -v waydroid >/dev/null 2>&1 || { echo "Waydroid is not installed."; exit 1; }
+          command -v waydroid >/dev/null 2>&1 || {
+            echo "Waydroid is not installed."
+            exit 1
+          }
           systemctl enable --now waydroid-container
           if [ ! -f /var/lib/waydroid/.crystalline-initialized ]; then
             waydroid init -s GAPPS
@@ -225,8 +288,14 @@ jobs:
           cat > config/includes.chroot/usr/local/bin/crystalline-android <<'ANDROID'
           #!/bin/bash
           set -Eeuo pipefail
-          command -v waydroid >/dev/null 2>&1 || { echo "Waydroid is not installed."; exit 1; }
-          systemctl is-active --quiet waydroid-container || { echo "Run sudo crystalline-android-setup first."; exit 1; }
+          command -v waydroid >/dev/null 2>&1 || {
+            echo "Waydroid is not installed."
+            exit 1
+          }
+          systemctl is-active --quiet waydroid-container || {
+            echo "Run sudo crystalline-android-setup first."
+            exit 1
+          }
           waydroid show-full-ui
           ANDROID
           chmod +x config/includes.chroot/usr/local/bin/crystalline-android
@@ -262,6 +331,25 @@ jobs:
 
           sudo chown -R "$(id -u):$(id -g)" config
 
+      - name: Validate workflow and configuration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import yaml
+          p = Path(".github/workflows/build-iso.yml")
+          yaml.safe_load(p.read_text())
+          print("Workflow YAML syntax: OK")
+          PY
+          test -s iso/config/package-lists/crystalline.list.chroot
+          ! grep -R -n 'bookworm/updates' iso/config
+          bash -n iso/config/hooks/normal/0900-install-waydroid.hook.chroot
+          bash -n iso/config/includes.chroot/usr/local/sbin/crystalline-android-setup
+          bash -n iso/config/includes.chroot/usr/local/bin/crystalline-android
+          python3 -m py_compile iso/config/includes.chroot/usr/local/bin/crystalline-ai
+          echo "Configuration checks passed."
+
       - name: Build ISO
         shell: bash
         run: |
@@ -274,8 +362,11 @@ jobs:
           set -e
           if [ "$BUILD_STATUS" -ne 0 ]; then
             echo "ERROR: live-build failed with exit code $BUILD_STATUS."
+            echo "Last 120 lines of build log:"
+            tail -n 120 ../build.log || true
             exit "$BUILD_STATUS"
           fi
+
           ISO_PATH="$(find . -maxdepth 1 -type f -name '*.iso' -print -quit)"
           if [ -z "$ISO_PATH" ]; then
             echo "ERROR: Build finished without producing an ISO."
