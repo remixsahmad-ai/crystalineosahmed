@@ -48,6 +48,44 @@ jobs:
           lb --version
           debootstrap --version
 
+      - name: Patch live-build Contents index URL
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SCRIPT="$(dpkg -L live-build | grep -E '/lb_chroot_linux-image$' | head -n 1 || true)"
+          if [ -z "$SCRIPT" ] || [ ! -f "$SCRIPT" ]; then
+            echo "ERROR: Could not locate live-build's kernel-image helper."
+            dpkg -L live-build | grep -Ei 'linux.*image|linux_image' || true
+            exit 1
+          fi
+          echo "Inspecting live-build helper: $SCRIPT"
+          grep -n -C 3 'Contents-' "$SCRIPT" || true
+          sudo python3 - "$SCRIPT" <<'PYCODE'
+          from pathlib import Path
+          import re
+          import sys
+
+          path = Path(sys.argv[1])
+          source = path.read_text()
+          original = source
+          # live-build versions construct this URL in slightly different ways.
+          # Add the main component directory immediately before Contents-.
+          source = re.sub(r'(?<![A-Za-z0-9_-])Contents-', 'main/Contents-', source)
+          # Avoid accidental duplicate insertion if the file already has main/.
+          source = source.replace('main/main/Contents-', 'main/Contents-')
+          if source == original:
+              print('ERROR: No Contents- URL was found to patch.')
+              raise SystemExit(1)
+          path.write_text(source)
+          print('Patched live-build helper: Contents index now includes main/.')
+          PYCODE
+          echo "Verifying patch:"
+          grep -n -C 2 'Contents-' "$SCRIPT"
+          if ! grep -q 'main/Contents-' "$SCRIPT"; then
+            echo "ERROR: Contents URL patch verification failed."
+            exit 1
+          fi
+
       - name: Configure Crystalline OS
         shell: bash
         run: |
