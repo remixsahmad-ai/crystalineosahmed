@@ -21,22 +21,18 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Update signing keyring
-        run: |
-          set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y \
-            debian-archive-keyring \
-            ca-certificates \
-            gnupg
-          test -s /usr/share/keyrings/debian-archive-keyring.gpg
+        uses: actions/checkout@v5
 
       - name: Install build dependencies
+        shell: bash
         run: |
           set -euxo pipefail
+
+          sudo apt-get update
           sudo apt-get install -y \
+            ca-certificates \
+            debian-archive-keyring \
+            gnupg \
             live-build \
             debootstrap \
             coreutils \
@@ -50,10 +46,9 @@ jobs:
             rsync
 
           test -x /usr/bin/env
-          lb --version
-          debootstrap --version
+          test -s /usr/share/keyrings/debian-archive-keyring.gpg
 
-      - name: Configure Crystalline OS
+      - name: Prepare clean build directory
         shell: bash
         run: |
           set -euxo pipefail
@@ -77,14 +72,18 @@ jobs:
             --apt-recommends true \
             --bootappend-live "boot=live components username=crystalline hostname=crystalline"
 
-          # Create all configuration directories with safe permissions.
+      - name: Configure packages and desktop
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd iso
+
           sudo install -d \
             config/package-lists \
             config/includes.chroot/etc/skel/.config \
-            config/includes.chroot/usr/share/icons/crystalline \
-            config/includes.chroot/usr/local/bin
+            config/includes.chroot/usr/local/bin \
+            config/includes.chroot/usr/share/icons/crystalline
 
-          # Package list: use sudo tee to avoid Permission denied.
           sudo tee config/package-lists/crystalline.list.chroot > /dev/null <<'PACKAGES'
           live-boot
           systemd-sysv
@@ -151,7 +150,7 @@ jobs:
                 <stop offset="1" stop-color="#00a85a"/>
               </linearGradient>
             </defs>
-            <rect x="4" y="4" width="120" height="120" rx="26" fill="#20252b" fill-opacity=".94" stroke="#a8ffca" stroke-opacity=".8" stroke-width="2"/>
+            <rect x="4" y="4" width="120" height="120" rx="26" fill="#20252b" stroke="#a8ffca" stroke-width="2"/>
             <path d="M37 30 L64 53 L91 30 L101 40 L77 64 L101 88 L91 98 L64 75 L37 98 L27 88 L51 64 L27 40 Z" fill="url(#g)"/>
           </svg>
           EOF
@@ -188,9 +187,7 @@ jobs:
                   payload = {
                       "model": "claude-sonnet-4-20250514",
                       "max_tokens": 1200,
-                      "messages": [
-                          {"role": "user", "content": prompt}
-                      ]
+                      "messages": [{"role": "user", "content": prompt}]
                   }
                   headers = {
                       "Content-Type": "application/json",
@@ -198,7 +195,7 @@ jobs:
                       "anthropic-version": "2023-06-01"
                   }
               else:
-                  print("Configure GEMINI_API_KEY or ANTHROPIC_API_KEY.")
+                  print("Set GEMINI_API_KEY or ANTHROPIC_API_KEY.")
                   return 2
 
               request = urllib.request.Request(
@@ -228,7 +225,7 @@ jobs:
               sys.exit(main())
           PY
 
-          sudo chmod +x config/includes.chroot/usr/local/bin/crystalline-ai
+          sudo chmod 755 config/includes.chroot/usr/local/bin/crystalline-ai
 
           sudo tee config/includes.chroot/etc/motd > /dev/null <<'EOF'
           Welcome to Crystalline OS
@@ -236,10 +233,8 @@ jobs:
           AI helper: crystalline-ai "describe your problem"
           EOF
 
-          # Verify that the critical configuration files exist.
           sudo test -s config/package-lists/crystalline.list.chroot
-          sudo test -s config/includes.chroot/usr/local/bin/crystalline-ai
-          sudo test -x /usr/bin/env
+          sudo test -x config/includes.chroot/usr/local/bin/crystalline-ai
 
       - name: Build ISO
         shell: bash
@@ -247,13 +242,12 @@ jobs:
           set -Eeuo pipefail
           cd iso
 
-          # Do not clean or reconfigure here: keep the prepared files.
           sudo lb build 2>&1 | tee ../build.log
 
           ISO_PATH="$(sudo find . -maxdepth 1 -type f -name '*.iso' -print -quit)"
 
           if [ -z "$ISO_PATH" ]; then
-            echo "ERROR: No ISO file was generated."
+            echo "ERROR: No ISO file was produced."
             exit 1
           fi
 
@@ -263,7 +257,7 @@ jobs:
 
       - name: Upload ISO and build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: crystalline-os-build
           path: |
