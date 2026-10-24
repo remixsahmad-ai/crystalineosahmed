@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: crystalline-os-build
+  group: crystalline-iso-build
   cancel-in-progress: false
 
 jobs:
@@ -21,18 +21,18 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Update signing keys and dependencies
         shell: bash
         run: |
           set -euxo pipefail
-
           sudo apt-get update
           sudo apt-get install -y \
-            ca-certificates \
             debian-archive-keyring \
+            ca-certificates \
             gnupg \
+            curl \
             live-build \
             debootstrap \
             coreutils \
@@ -45,21 +45,19 @@ jobs:
             file \
             rsync
 
-          test -x /usr/bin/env
           test -s /usr/share/keyrings/debian-archive-keyring.gpg
+          lb --version
+          debootstrap --version
 
-      - name: Prepare clean build directory
+      - name: Configure Crystalline OS
         shell: bash
         run: |
           set -euxo pipefail
-
           mkdir -p iso
           cd iso
 
           sudo lb clean --purge || true
 
-          # NOTE: --security false avoids the broken "bookworm/updates" entry.
-          # The correct security repo (bookworm-security) is added manually below.
           sudo lb config \
             --mode debian \
             --distribution bookworm \
@@ -70,32 +68,20 @@ jobs:
             --mirror-bootstrap https://deb.debian.org/debian \
             --mirror-chroot https://deb.debian.org/debian \
             --mirror-binary https://deb.debian.org/debian \
-            --security false \
             --keyring-packages debian-archive-keyring \
             --apt-recommends true \
-            --linux-flavours "amd64" \
-            --linux-packages "linux-image" \
             --bootappend-live "boot=live components username=crystalline hostname=crystalline"
 
-          # Correct security repository for Debian 12 (bookworm)
-          sudo install -d config/archives
-          echo "deb https://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware" | \
-            sudo tee config/archives/security.list.chroot > /dev/null
+          mkdir -p config/package-lists config/apt
 
-      - name: Configure packages and desktop
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd iso
+          # Disable optional Contents indexes.
+          # These indexes are not needed to install the requested packages.
+          cat > config/apt/apt.conf.chroot <<'APTCONF'
+          Acquire::IndexTargets::deb::Contents-deb::DefaultEnabled "false";
+          Acquire::IndexTargets::deb::Contents-udeb::DefaultEnabled "false";
+          APTCONF
 
-          sudo install -d \
-            config/package-lists \
-            config/includes.chroot/etc/skel/.config \
-            config/includes.chroot/usr/local/bin \
-            config/includes.chroot/usr/share/icons/crystalline
-
-          sudo tee config/package-lists/crystalline.list.chroot > /dev/null <<'PACKAGES'
-          linux-image-amd64
+          cat > config/package-lists/crystalline.list.chroot <<'PACKAGES'
           live-boot
           systemd-sysv
           sudo
@@ -136,9 +122,140 @@ jobs:
           unzip
           p7zip-full
           coreutils
-          PACKAGES
+          lxc
+          iptables
+          sqlite3
+          dbus-user-session
+          policykit-1
+          wayland-utils
+          weston
+          APTCONF
 
-          sudo tee config/includes.chroot/etc/skel/.config/kdeglobals > /dev/null <<'EOF'
+      - name: Prepare Waydroid installation
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd iso
+
+          mkdir -p \
+            config/hooks/normal \
+            config/includes.chroot/etc/skel/.config \
+            config/includes.chroot/etc/skel/.local/share/applications \
+            config/includes.chroot/usr/local/bin \
+            config/includes.chroot/usr/local/sbin \
+            config/includes.chroot/usr/share/applications \
+            config/includes.chroot/usr/share/icons/crystalline \
+            config/includes.chroot/etc/systemd/system
+
+          # Install Waydroid in the target filesystem.
+          # Android images are initialized separately on first boot.
+          cat > config/hooks/normal/0900-install-waydroid.hook.chroot <<'HOOK'
+          #!/bin/bash
+          set -Eeuo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+
+          apt-get update
+          apt-get install -y curl ca-certificates
+
+          curl -fsSL https://repo.waydro.id \
+            -o /tmp/waydroid-repo-installer
+
+          bash /tmp/waydroid-repo-installer bookworm
+
+          apt-get update
+          apt-get install -y waydroid
+
+          command -v waydroid
+          rm -f /tmp/waydroid-repo-installer
+          apt-get clean
+          HOOK
+
+          chmod +x config/hooks/normal/0900-install-waydroid.hook.chroot
+
+          # Configure Crystalline first-run Android setup.
+          cat > config/includes.chroot/usr/local/sbin/crystalline-android-setup <<'SETUP'
+          #!/bin/bash
+          set -Eeuo pipefail
+
+          if [ "$(id -u)" -ne 0 ]; then
+            echo "Run this command with sudo."
+            exit 1
+          fi
+
+          if ! command -v waydroid >/dev/null 2>&1; then
+            echo "Waydroid is not installed."
+            exit 1
+          fi
+
+          systemctl enable --now waydroid-container
+
+          if [ ! -f /var/lib/waydroid/.crystalline-initialized ]; then
+            waydroid init -s GAPPS
+            touch /var/lib/waydroid/.crystalline-initialized
+          fi
+
+          echo "Android image initialization completed."
+          echo "Log in to Google Play if device certification is required."
+          SETUP
+
+          chmod +x \
+            config/includes.chroot/usr/local/sbin/crystalline-android-setup
+
+          cat > config/includes.chroot/usr/local/bin/crystalline-android <<'ANDROID'
+          #!/bin/bash
+          set -Eeuo pipefail
+
+          if ! command -v waydroid >/dev/null 2>&1; then
+            echo "Waydroid is not installed."
+            exit 1
+          fi
+
+          if ! systemctl is-active --quiet waydroid-container; then
+            echo "Start Android setup first:"
+            echo "sudo crystalline-android-setup"
+            exit 1
+          fi
+
+          waydroid show-full-ui
+          ANDROID
+
+          chmod +x \
+            config/includes.chroot/usr/local/bin/crystalline-android
+
+          cat > config/includes.chroot/usr/share/applications/crystalline-android-setup.desktop <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Crystalline Android Setup
+          Comment=Initialize Android and Google Play
+          Exec=konsole -e sudo /usr/local/sbin/crystalline-android-setup
+          Icon=phone
+          Terminal=false
+          Categories=System;
+          DESKTOP
+
+          cat > config/includes.chroot/usr/share/applications/crystalline-android.desktop <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Crystalline Android
+          Comment=Launch the Android environment
+          Exec=/usr/local/bin/crystalline-android
+          Icon=phone
+          Terminal=false
+          Categories=System;
+          DESKTOP
+
+      - name: Install Crystalline theme and AI helper
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd iso
+
+          mkdir -p \
+            config/includes.chroot/usr/share/icons/crystalline \
+            config/includes.chroot/etc/skel/.config \
+            config/includes.chroot/usr/local/bin
+
+          cat > config/includes.chroot/etc/skel/.config/kdeglobals <<'EOF'
           [General]
           ColorScheme=BreezeDark
           Name=Crystalline
@@ -148,12 +265,12 @@ jobs:
           widgetStyle=Breeze
           EOF
 
-          sudo tee config/includes.chroot/etc/skel/.config/kwinrc > /dev/null <<'EOF'
+          cat > config/includes.chroot/etc/skel/.config/kwinrc <<'EOF'
           [Plugins]
           blurEnabled=true
           EOF
 
-          sudo tee config/includes.chroot/usr/share/icons/crystalline/crystalline-x.svg > /dev/null <<'EOF'
+          cat > config/includes.chroot/usr/share/icons/crystalline/crystalline-x.svg <<'EOF'
           <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
             <defs>
               <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
@@ -161,12 +278,12 @@ jobs:
                 <stop offset="1" stop-color="#00a85a"/>
               </linearGradient>
             </defs>
-            <rect x="4" y="4" width="120" height="120" rx="26" fill="#20252b" stroke="#a8ffca" stroke-width="2"/>
+            <rect x="4" y="4" width="120" height="120" rx="26" fill="#20252b" fill-opacity=".94" stroke="#a8ffca" stroke-opacity=".8" stroke-width="2"/>
             <path d="M37 30 L64 53 L91 30 L101 40 L77 64 L101 88 L91 98 L64 75 L37 98 L27 88 L51 64 L27 40 Z" fill="url(#g)"/>
           </svg>
           EOF
 
-          sudo tee config/includes.chroot/usr/local/bin/crystalline-ai > /dev/null <<'PY'
+          cat > config/includes.chroot/usr/local/bin/crystalline-ai <<'PY'
           #!/usr/bin/python3
           import os
           import sys
@@ -177,7 +294,7 @@ jobs:
           def main():
               prompt = " ".join(sys.argv[1:]).strip()
               if not prompt:
-                  print("Usage: crystalline-ai 'describe your problem'")
+                  print("Usage: crystalline-ai 'describe the problem'")
                   print("Set GEMINI_API_KEY or ANTHROPIC_API_KEY first.")
                   return 2
 
@@ -187,7 +304,8 @@ jobs:
               if gemini:
                   url = (
                       "https://generativelanguage.googleapis.com/v1beta/"
-                      "models/gemini-2.5-flash:generateContent?key=" + gemini
+                      "models/gemini-2.5-flash:generateContent"
+                      "?key=" + gemini
                   )
                   payload = {
                       "contents": [{"parts": [{"text": prompt}]}]
@@ -196,9 +314,11 @@ jobs:
               elif claude:
                   url = "https://api.anthropic.com/v1/messages"
                   payload = {
-                      "model": "claude-sonnet-4-6",
+                      "model": "claude-sonnet-4-20250514",
                       "max_tokens": 1200,
-                      "messages": [{"role": "user", "content": prompt}]
+                      "messages": [
+                          {"role": "user", "content": prompt}
+                      ]
                   }
                   headers = {
                       "Content-Type": "application/json",
@@ -206,7 +326,7 @@ jobs:
                       "anthropic-version": "2023-06-01"
                   }
               else:
-                  print("Set GEMINI_API_KEY or ANTHROPIC_API_KEY.")
+                  print("Configure GEMINI_API_KEY or ANTHROPIC_API_KEY.")
                   return 2
 
               request = urllib.request.Request(
@@ -229,24 +349,54 @@ jobs:
               except (urllib.error.URLError, KeyError, ValueError) as error:
                   print("AI request failed:", error)
                   return 1
-
               return 0
 
           if __name__ == "__main__":
               sys.exit(main())
           PY
 
-          sudo chmod 755 config/includes.chroot/usr/local/bin/crystalline-ai
+          chmod +x \
+            config/includes.chroot/usr/local/bin/crystalline-ai
 
-          sudo tee config/includes.chroot/etc/motd > /dev/null <<'EOF'
+          cat > config/includes.chroot/etc/motd <<'EOF'
           Welcome to Crystalline OS
           Debian Live | KDE Plasma | Dark crystalline desktop
           AI helper: crystalline-ai "describe your problem"
+          Android: Crystalline Android Setup
           EOF
 
-          sudo test -s config/package-lists/crystalline.list.chroot
-          sudo test -x config/includes.chroot/usr/local/bin/crystalline-ai
-          sudo test -s config/archives/security.list.chroot
+      - name: Patch live-build Contents URL
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          # Find the script responsible for downloading Contents indexes.
+          SCRIPT="$(dpkg -L live-build \
+            | grep '/lb_chroot_linux-image$' \
+            | head -n 1 || true)"
+
+          if [ -z "$SCRIPT" ] || [ ! -f "$SCRIPT" ]; then
+            echo "No matching lb_chroot_linux-image script found."
+            echo "The Contents-index APT configuration remains enabled."
+            exit 1
+          fi
+
+          echo "Inspecting: $SCRIPT"
+          grep -n 'Contents-' "$SCRIPT" || true
+
+          # Fix the incorrect root-level Contents URL if present.
+          sudo sed -i \
+            's|/dists/${LB_PARENT_DISTRIBUTION}/Contents-|/dists/${LB_PARENT_DISTRIBUTION}/main/Contents-|g' \
+            "$SCRIPT"
+
+          if sudo grep -Fq \
+            '/dists/${LB_PARENT_DISTRIBUTION}/Contents-' "$SCRIPT"; then
+            echo "ERROR: Could not patch the Contents URL."
+            exit 1
+          fi
+
+          echo "Contents URL patch verification:"
+          sudo grep -n 'Contents-' "$SCRIPT" || true
 
       - name: Build ISO
         shell: bash
@@ -254,26 +404,31 @@ jobs:
           set -Eeuo pipefail
           cd iso
 
+          # Do not clean again here: preserve the prepared configuration.
           sudo lb build 2>&1 | tee ../build.log
 
-          ISO_PATH="$(sudo find . -maxdepth 1 -type f -name '*.iso' -print -quit)"
+          ISO_PATH="$(find . -maxdepth 1 -type f -name '*.iso' -print -quit)"
 
           if [ -z "$ISO_PATH" ]; then
-            echo "ERROR: No ISO file was produced."
+            echo "ERROR: Build finished without producing an ISO."
             exit 1
           fi
 
           sudo cp "$ISO_PATH" ../Crystalline-OS-amd64.iso
           sudo chown "$(id -u):$(id -g)" ../Crystalline-OS-amd64.iso
+
           file ../Crystalline-OS-amd64.iso
+          sha256sum ../Crystalline-OS-amd64.iso \
+            | tee ../Crystalline-OS-amd64.iso.sha256
 
       - name: Upload ISO and build log
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: crystalline-os-build
           path: |
             Crystalline-OS-amd64.iso
+            Crystalline-OS-amd64.iso.sha256
             build.log
           if-no-files-found: warn
           retention-days: 7
